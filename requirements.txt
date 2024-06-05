@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+scikit-learn==1.2.2
+pandas
+geopy
