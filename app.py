@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.neighbors import KDTree
 import pandas as pd
@@ -23,57 +23,36 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 讀入POI數據
-try:
-    poi_data = pd.read_csv('poi_all.csv')
-    poi_data['coordinates'] = list(zip(poi_data.lat, poi_data.lng))
-except FileNotFoundError:
-    logger.error("POI data file not found")
-    raise HTTPException(status_code=500, detail="POI data file not found")
-except pd.errors.EmptyDataError:
-    logger.error("POI data file is empty")
-    raise HTTPException(status_code=500, detail="POI data file is empty")
-except Exception as e:
-    logger.error(f"An error occurred while loading POI data: {e}")
-    raise HTTPException(status_code=500, detail="An error occurred while loading POI data")
+poi_data = None
+trees = {}
 
-# 構建並保存KD-tree
-def build_and_save_kdtrees(poi_data):
+# 構建KD-tree（不保存到磁碟）
+def build_kdtrees(poi_data):
     trees = {}
     for poi_type, group in poi_data.groupby('poi_type'):
         coords = np.array(list(group['coordinates']))
         tree = KDTree(coords, leaf_size=2)
         trees[poi_type] = tree
-        try:
-            joblib.dump(tree, f'kdtree_{poi_type}.pkl')
-        except IOError as e:
-            logger.error(f"An error occurred while saving KD-tree for {poi_type}: {e}")
-            raise HTTPException(status_code=500, detail=f"An error occurred while saving KD-tree for {poi_type}")
     return trees
 
-# 加載KD-tree
-def load_kdtrees(poi_data):
-    trees = {}
-    for poi_type in poi_data['poi_type'].unique():
-        if os.path.exists(f'kdtree_{poi_type}.pkl'):
-            try:
-                trees[poi_type] = joblib.load(f'kdtree_{poi_type}.pkl')
-            except IOError as e:
-                logger.error(f"An error occurred while loading KD-tree for {poi_type}: {e}")
-                raise HTTPException(status_code=500, detail=f"An error occurred while loading KD-tree for {poi_type}")
-        else:
-            logger.error(f'KD-tree for poi_type {poi_type} not found')
-            raise HTTPException(status_code=500, detail=f'KD-tree for poi_type {poi_type} not found')
-    return trees
-
-# 如果KD-tree文件存在則加載，否則構建並保存
-if all(os.path.exists(f'kdtree_{poi_type}.pkl') for poi_type in poi_data['poi_type'].unique()):
-    trees = load_kdtrees(poi_data)
-else:
-    trees = build_and_save_kdtrees(poi_data)
+@app.post("/upload-poi")
+async def upload_poi(file: UploadFile = File(...)):
+    global poi_data, trees
+    try:
+        poi_data = pd.read_csv(file.file)
+        poi_data['coordinates'] = list(zip(poi_data.lat, poi_data.lng))
+        trees = build_kdtrees(poi_data)
+        return {"message": "POI data uploaded and KD-trees built successfully"}
+    except Exception as e:
+        logger.error(f"An error occurred while processing the uploaded POI data: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while processing the uploaded POI data")
 
 @app.get("/poi/nearest")
 def get_nearest_poi(lat: float, lng: float, poi_type: str = Query(...)):
+    global poi_data, trees
+    if poi_data is None or trees == {}:
+        raise HTTPException(status_code=400, detail="POI data not uploaded")
+
     coords = np.array([[lat, lng]])
 
     if poi_type == "all":
@@ -120,6 +99,13 @@ def get_nearest_poi(lat: float, lng: float, poi_type: str = Query(...)):
             })
 
         return nearest_pois
+
+@app.post("/clear-kdtrees")
+def clear_kdtrees():
+    global poi_data, trees
+    poi_data = None
+    trees = {}
+    return {"message": "KD-trees and POI data cleared successfully"}
 
 # 運行應用
 if __name__ == "__main__":
